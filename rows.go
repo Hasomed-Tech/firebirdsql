@@ -70,11 +70,6 @@ func (rows *firebirdsqlRows) Close() (er error) {
 }
 
 func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
-	if rows.ctx.Err() != nil {
-		rows.stmt.fc.wp.opCancel(fb_cancel_raise)
-		return rows.ctx.Err()
-	}
-
 	if rows.stmt.stmtType == isc_info_sql_stmt_exec_procedure {
 		if rows.result != nil {
 			for i, v := range rows.result {
