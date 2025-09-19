@@ -1410,6 +1410,7 @@ func TestTimeoutQueryContextDuringRowNext(t *testing.T) {
 	testDsn := GetTestDSN("test_timeout_query_context_during_row_next_")
 	conn, err := sql.Open("firebirdsql_createdb", testDsn)
 	require.NoError(t, err)
+	defer conn.Close()
 
 	// set up context with timeout
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second*2)
@@ -1424,9 +1425,30 @@ func TestTimeoutQueryContextDuringRowNext(t *testing.T) {
 	assert.False(t, rows.Next())
 	delayAfterDeadline := time.Since(deadline)
 	err = rows.Err()
-	assert.Less(t, delayAfterDeadline, 100*time.Millisecond)
 	assert.EqualError(t, err, "operation was cancelled\n")
 	assert.ErrorIs(t, ctx.Err(), context.DeadlineExceeded)
+
+	// make sure the call to rows.Next was cut off by the deadline
+	assert.Less(t, delayAfterDeadline, 100*time.Millisecond)
+
+	// make sure the query isn't still running
+	assert.Equal(t, 0, countActiveStatements(t, conn))
+}
+
+func countActiveStatements(t *testing.T, conn *sql.DB) int {
+	t.Helper()
+	retries := 2
+query:
+	var count int
+	err := conn.QueryRow(`SELECT COUNT(*) FROM MON$STATEMENTS WHERE MON$STATE = 1`).Scan(&count)
+	if err != nil && strings.Contains(err.Error(), "object DATABASE is in use") && retries > 0 {
+		// the MON$STATEMENTS query fails if it's done too quickly after the previous statement
+		time.Sleep(100 * time.Millisecond)
+		retries--
+		goto query
+	}
+	require.NoError(t, err)
+	return count - 1 // subtract 1 for the MON$STATEMENTS query itself
 }
 
 func TestTimeoutQueryContextDuringExec(t *testing.T) {
