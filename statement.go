@@ -35,12 +35,15 @@ type firebirdsqlStmt struct {
 	xsqlda      []xSQLVAR
 	blr         []byte
 	stmtType    int32
+	done        chan struct{}
 }
 
 func (stmt *firebirdsqlStmt) Close() (err error) {
 	if stmt.stmtHandle == -1 { // alredy closed
 		return
 	}
+	defer close(stmt.done)
+
 	err = stmt.fc.wp.opFreeStatement(stmt.stmtHandle, 2) // DSQL_drop
 	stmt.stmtHandle = -1
 	if err != nil {
@@ -63,10 +66,10 @@ func (stmt *firebirdsqlStmt) NumInput() int {
 	return -1
 }
 
-func (stmt *firebirdsqlStmt) sendOpCancel(ctx context.Context, done chan struct{}) {
+func (stmt *firebirdsqlStmt) sendOpCancel(ctx context.Context) {
 	cancel := true
 	select {
-	case <-done:
+	case <-stmt.done:
 		cancel = false
 	case <-ctx.Done():
 	}
@@ -81,10 +84,8 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 		return
 	}
 
-	var done = make(chan struct{}, 1)
-	go stmt.sendOpCancel(ctx, done)
+	go stmt.sendOpCancel(ctx)
 	_, _, _, err = stmt.fc.wp.opResponse()
-	done <- struct{}{}
 
 	if err != nil {
 		return
@@ -125,7 +126,6 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 	var rows driver.Rows
 	var err error
 	var result []driver.Value
-	var done = make(chan struct{}, 1)
 
 	if stmt.fc.tx.needBegin {
 		err := stmt.fc.tx.begin()
@@ -144,9 +144,8 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
-		go stmt.sendOpCancel(ctx, done)
+		go stmt.sendOpCancel(ctx)
 		result, err = stmt.fc.wp.opSqlResponse(stmt.xsqlda)
-		done <- struct{}{}
 		if err != nil {
 			return nil, err
 		}
@@ -163,9 +162,8 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
-		go stmt.sendOpCancel(ctx, done)
+		go stmt.sendOpCancel(ctx)
 		_, _, _, err = stmt.fc.wp.opResponse()
-		done <- struct{}{}
 
 		if err != nil {
 			return nil, err
@@ -184,6 +182,7 @@ func newFirebirdsqlStmt(fc *firebirdsqlConn, query string) (stmt *firebirdsqlStm
 	stmt = new(firebirdsqlStmt)
 	stmt.fc = fc
 	stmt.queryString = query
+	stmt.done = make(chan struct{})
 
 	err = stmt.fc.wp.opAllocateStatement()
 	if err != nil {
