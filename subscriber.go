@@ -6,11 +6,10 @@ package firebirdsql
 import (
 	"encoding/binary"
 	"fmt"
-	"net/netip"
-	"reflect"
+	"net"
+	"strconv"
 	"sync"
 	"sync/atomic"
-	"syscall"
 )
 
 type Subscription struct {
@@ -44,6 +43,17 @@ func newSubscription(dsn *firebirdDsn, events []string, cb EventHandler, chEvent
 		doneSubscription: make(chan struct{}),
 		chDoneEvent:      chDoneEvent,
 	}
+	initialized := false
+	defer func() {
+		if initialized {
+			return
+		}
+		if newSubscription.manager != nil {
+			_ = newSubscription.manager.close()
+		}
+		_ = fc.wp.conn.Close()
+	}()
+
 	manager, err := newSubscription.getEventManager()
 	if err != nil {
 		return nil, err
@@ -57,7 +67,10 @@ func newSubscription(dsn *firebirdDsn, events []string, cb EventHandler, chEvent
 
 	newSubscription.revent = remoteEvent
 
-	newSubscription.queueEvents(0)
+	if err := newSubscription.queueEvents(0); err != nil {
+		return nil, err
+	}
+	initialized = true
 	chErrManager := manager.wait(remoteEvent, newSubscription.eventCounts)
 	go newSubscription.wait(chErrManager)
 
@@ -97,11 +110,15 @@ func (s *Subscription) queueEvents(eventID int32) error {
 }
 
 func (s *Subscription) getEventManager() (*eventManager, error) {
-	auxHandle, addrPort, err := s.connAuxRequest()
+	auxHandle, port, err := s.connAuxRequest()
 	if err != nil {
 		return nil, err
 	}
-	newManager, err := newEventManager(addrPort.String(), auxHandle)
+	address, err := auxiliaryAddress(s.fc.wp.conn.conn.RemoteAddr(), port)
+	if err != nil {
+		return nil, err
+	}
+	newManager, err := newEventManager(address, auxHandle)
 	if err != nil {
 		return nil, err
 	}
@@ -152,33 +169,31 @@ func (s *Subscription) unsubscribeNoNotify() error {
 	return s.Unsubscribe()
 }
 
-func (s *Subscription) connAuxRequest() (int32, *netip.AddrPort, error) {
+func (s *Subscription) connAuxRequest() (int32, uint16, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.fc.wp.opConnectRequest()
 	auxHandle, _, buf, err := s.fc.wp.opResponse()
 	if err != nil {
-		return -1, nil, err
+		return -1, 0, err
 	}
-	family := bytes_to_int16(buf[0:2])
-	port := binary.BigEndian.Uint16(buf[2:4])
-
-	var addr netip.Addr
-	if family == syscall.AF_INET {
-		addr = netip.AddrFrom4([4]byte(buf[4:8]))
-	} else if family == syscall.AF_INET6 {
-		if reflect.DeepEqual(buf[4:20], []byte{0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff}) {
-			addr = netip.AddrFrom4([4]byte(buf[20:24]))
-		} else {
-			addr = netip.AddrFrom16([16]byte(buf[4:20]))
-		}
-	} else {
-
-		err = fmt.Errorf("unsupported  family protocol: %x", family)
-		return -1, nil, err
+	if len(buf) < 4 {
+		return -1, 0, fmt.Errorf("invalid auxiliary connection address: got %d bytes", len(buf))
 	}
-	addrPort := netip.AddrPortFrom(addr, port)
-	return auxHandle, &addrPort, nil
+	return auxHandle, binary.BigEndian.Uint16(buf[2:4]), nil
+}
+
+// auxiliaryAddress follows the Firebird client behavior: the server-provided
+// address may be unreachable behind NAT, so only its auxiliary port is used.
+func auxiliaryAddress(remoteAddr net.Addr, port uint16) (string, error) {
+	if remoteAddr == nil {
+		return "", fmt.Errorf("missing main connection remote address")
+	}
+	host, _, err := net.SplitHostPort(remoteAddr.String())
+	if err != nil {
+		return "", fmt.Errorf("parsing main connection remote address: %w", err)
+	}
+	return net.JoinHostPort(host, strconv.Itoa(int(port))), nil
 }
 
 func (s *Subscription) NotifyClose(receiver chan error) {
