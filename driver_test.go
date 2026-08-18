@@ -759,6 +759,11 @@ func TestLegacyAuthWireCrypt(t *testing.T) {
 	}
 	conn.Close()
 
+	if get_firebird_major_version(t) >= 5 {
+		t.Log("Legacy_Auth is disabled for Firebird 5")
+		return
+	}
+
 	conn, err = sql.Open("firebirdsql", test_dsn+"?auth_plugin_name=Legacy_Auth&wire_auth=true")
 	if err != nil {
 		t.Fatalf("Error connecting: %v", err)
