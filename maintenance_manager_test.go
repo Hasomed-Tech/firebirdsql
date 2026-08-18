@@ -192,10 +192,14 @@ func TestServiceManager_CommitTransaction(t *testing.T) {
 		t.Log("This tests should fail, but on 2.5 it passing. Ignoring this error as 2.5 is obsolete")
 		return
 	}
-	assert.EqualError(t, err, fmt.Sprintf(`failed to reconnect to a transaction in database %s
+	expectedError := fmt.Sprintf(`failed to reconnect to a transaction in database %s
 transaction is not in limbo
 transaction 1 is committed
-`, db))
+`, db)
+	if get_firebird_major_version(t) >= 5 {
+		expectedError = fmt.Sprintf("failed to reconnect to a transaction in database %s\n", db)
+	}
+	assert.EqualError(t, err, expectedError)
 }
 
 func TestServiceManager_RollbackTransaction(t *testing.T) {
@@ -211,10 +215,14 @@ func TestServiceManager_RollbackTransaction(t *testing.T) {
 		t.Log("This tests should fail, but on 2.5 it passing. Ignoring this error as 2.5 is obsolete")
 		return
 	}
-	assert.EqualError(t, err, fmt.Sprintf(`failed to reconnect to a transaction in database %s
+	expectedError := fmt.Sprintf(`failed to reconnect to a transaction in database %s
 transaction is not in limbo
 transaction 1 is committed
-`, db))
+`, db)
+	if get_firebird_major_version(t) >= 5 {
+		expectedError = fmt.Sprintf("failed to reconnect to a transaction in database %s\n", db)
+	}
+	assert.EqualError(t, err, expectedError)
 }
 
 func TestServiceManager_SetDatabaseMode(t *testing.T) {
