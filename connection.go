@@ -68,13 +68,17 @@ func (fc *firebirdsqlConn) Close() (err error) {
 	for tx := range fc.transactionSet {
 		tx.Rollback()
 	}
+	defer func() {
+		if closeErr := fc.wp.conn.Close(); err == nil {
+			err = closeErr
+		}
+	}()
 
 	err = fc.wp.opDetach()
 	if err != nil {
 		return
 	}
 	_, _, _, err = fc.wp.opResponse()
-	fc.wp.conn.Close()
 	return
 }
 
@@ -137,6 +141,11 @@ func newFirebirdsqlConn(dsn *firebirdDsn) (fc *firebirdsqlConn, err error) {
 	if err != nil {
 		return
 	}
+	defer func() {
+		if err != nil {
+			_ = wp.conn.Close()
+		}
+	}()
 
 	column_name_to_lower := convertToBool(dsn.options["column_name_to_lower"], false)
 
@@ -181,6 +190,11 @@ func createFirebirdsqlConn(dsn *firebirdDsn) (fc *firebirdsqlConn, err error) {
 	if err != nil {
 		return
 	}
+	defer func() {
+		if err != nil {
+			_ = wp.conn.Close()
+		}
+	}()
 	column_name_to_lower := convertToBool(dsn.options["column_name_to_lower"], false)
 
 	clientPublic, clientSecret := getClientSeed()

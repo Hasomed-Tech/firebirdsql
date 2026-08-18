@@ -1,0 +1,62 @@
+name: Firebird events through NAT
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        go: ['1.26']
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start Firebird behind a published port
+        run: |
+          docker network create firebird-server
+          docker network create firebird-client
+          docker run --detach --rm \
+            --name firebird-nat \
+            --network firebird-server \
+            --publish 3050:3050 \
+            --publish 3051:3051 \
+            --env FIREBIRD_ROOT_PASSWORD=masterkey \
+            --env FIREBIRD_DATABASE=events-nat.fdb \
+            --env FIREBIRD_CONF_RemoteAuxPort=3051 \
+            firebirdsql/firebird:3.0.14
+
+          for attempt in {1..30}; do
+            if (echo > /dev/tcp/127.0.0.1/3050) 2>/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+
+          docker logs firebird-nat
+          exit 1
+
+      - name: Test events from a separate network
+        run: |
+          FIREBIRD_SERVER_IP=$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' firebird-nat)
+
+          docker run --rm --cap-add NET_ADMIN \
+            --network firebird-client \
+            --add-host host.docker.internal:host-gateway \
+            --volume "$PWD:/src" \
+            --workdir /src \
+            --env FIREBIRD_SERVER_IP="$FIREBIRD_SERVER_IP" \
+            --env FIREBIRD_NAT_TEST_DSN=sysdba:masterkey@host.docker.internal:3050/var/lib/firebird/data/events-nat.fdb \
+            golang:1.22-alpine \
+            sh -c 'ip route add blackhole "$FIREBIRD_SERVER_IP/32" && go test -v -timeout 30s -run "^TestEventsThroughNAT$" .'
+
+      - name: Firebird logs
+        if: always()
+        run: |
+          docker logs firebird-nat || true
+          docker stop firebird-nat || true
