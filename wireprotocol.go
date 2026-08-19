@@ -27,6 +27,7 @@ import (
 	"bytes"
 	"container/list"
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -76,7 +77,7 @@ func _INFO_SQL_SELECT_DESCRIBE_VARS() []byte {
 type wireProtocol struct {
 	buf []byte
 
-	conn     wireChannel
+	conn     *wireChannel
 	dbHandle int32
 	addr     string
 
@@ -206,17 +207,10 @@ func (p *wireProtocol) uid(user string, password string, authPluginName string, 
 
 func (p *wireProtocol) sendPackets() (written int, err error) {
 	p.debugPrint("\tsendPackets():%v", p.buf)
-	n := 0
-	for written < len(p.buf) {
-		n, err = p.conn.Write(p.buf[written:])
-		if err != nil {
-			// error while sending the package....
-			err = driver.ErrBadConn
-			break
-		}
-		written += n
+	written, err = p.conn.writePacket(p.buf)
+	if err != nil {
+		err = driver.ErrBadConn
 	}
-	p.conn.Flush()
 	p.buf = make([]byte, 0, BUFFER_LEN)
 	return
 }
@@ -1444,10 +1438,13 @@ func (p *wireProtocol) opCancelEvents(eventID int32) {
 
 func (p *wireProtocol) opCancel(kind int) error {
 	p.debugPrint("opCancel")
-	p.packInt(op_cancel)
-	p.packInt(int32(kind))
-	_, err := p.sendPackets()
-	return err
+	packet := binary.BigEndian.AppendUint32(nil, uint32(op_cancel))
+	packet = binary.BigEndian.AppendUint32(packet, uint32(kind))
+	_, err := p.conn.writePacket(packet)
+	if err != nil {
+		return driver.ErrBadConn
+	}
+	return nil
 }
 
 func (p *wireProtocol) encodeString(str string) string {

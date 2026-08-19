@@ -26,6 +26,7 @@ package firebirdsql
 import (
 	"context"
 	"database/sql/driver"
+	"sync"
 )
 
 type firebirdsqlStmt struct {
@@ -35,15 +36,12 @@ type firebirdsqlStmt struct {
 	xsqlda      []xSQLVAR
 	blr         []byte
 	stmtType    int32
-	done        chan struct{}
 }
 
 func (stmt *firebirdsqlStmt) Close() (err error) {
 	if stmt.stmtHandle == -1 { // alredy closed
 		return
 	}
-	defer close(stmt.done)
-
 	err = stmt.fc.wp.opFreeStatement(stmt.stmtHandle, 2) // DSQL_drop
 	stmt.stmtHandle = -1
 	if err != nil {
@@ -66,16 +64,51 @@ func (stmt *firebirdsqlStmt) NumInput() int {
 	return -1
 }
 
-func (stmt *firebirdsqlStmt) sendOpCancel(ctx context.Context) {
-	cancel := true
-	select {
-	case <-stmt.done:
-		cancel = false
-	case <-ctx.Done():
+func watchContext(ctx context.Context, cancel func()) func() {
+	if ctx.Done() == nil {
+		return func() {}
 	}
-	if cancel {
-		stmt.fc.wp.opCancel(fb_cancel_raise)
+
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	var mu sync.Mutex
+	var completed bool
+
+	go func() {
+		defer close(finished)
+
+		select {
+		case <-done:
+			return
+		case <-ctx.Done():
+		}
+
+		mu.Lock()
+		if completed {
+			mu.Unlock()
+			return
+		}
+		mu.Unlock()
+
+		cancel()
+	}()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			mu.Lock()
+			completed = true
+			close(done)
+			mu.Unlock()
+		})
+		<-finished
 	}
+}
+
+func (stmt *firebirdsqlStmt) watchCancel(ctx context.Context) func() {
+	return watchContext(ctx, func() {
+		_ = stmt.fc.wp.opCancel(fb_cancel_raise)
+	})
 }
 
 func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (result driver.Result, err error) {
@@ -84,7 +117,8 @@ func (stmt *firebirdsqlStmt) exec(ctx context.Context, args []driver.Value) (res
 		return
 	}
 
-	go stmt.sendOpCancel(ctx)
+	stopCancel := stmt.watchCancel(ctx)
+	defer stopCancel()
 	_, _, _, err = stmt.fc.wp.opResponse()
 
 	if err != nil {
@@ -144,7 +178,8 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
-		go stmt.sendOpCancel(ctx)
+		stopCancel := stmt.watchCancel(ctx)
+		defer stopCancel()
 		result, err = stmt.fc.wp.opSqlResponse(stmt.xsqlda)
 		if err != nil {
 			return nil, err
@@ -162,7 +197,8 @@ func (stmt *firebirdsqlStmt) query(ctx context.Context, args []driver.Value) (dr
 			return nil, err
 		}
 
-		go stmt.sendOpCancel(ctx)
+		stopCancel := stmt.watchCancel(ctx)
+		defer stopCancel()
 		_, _, _, err = stmt.fc.wp.opResponse()
 
 		if err != nil {
@@ -182,8 +218,6 @@ func newFirebirdsqlStmt(fc *firebirdsqlConn, query string) (stmt *firebirdsqlStm
 	stmt = new(firebirdsqlStmt)
 	stmt.fc = fc
 	stmt.queryString = query
-	stmt.done = make(chan struct{})
-
 	err = stmt.fc.wp.opAllocateStatement()
 	if err != nil {
 		return nil, err

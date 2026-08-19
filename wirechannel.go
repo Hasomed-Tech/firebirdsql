@@ -32,6 +32,7 @@ import (
 	"github.com/nakagami/chacha20"
 	"golang.org/x/exp/slices"
 	"net"
+	"sync"
 	//"unsafe"
 )
 
@@ -44,16 +45,16 @@ type wireChannel struct {
 	rc4writer      *rc4.Cipher
 	chacha20reader *chacha20.Cipher
 	chacha20writer *chacha20.Cipher
+	writeMu        sync.Mutex
 }
 
-func newWireChannel(conn net.Conn) (wireChannel, error) {
-	var err error
+func newWireChannel(conn net.Conn) (*wireChannel, error) {
 	c := new(wireChannel)
 	c.conn = conn
 	c.reader = bufio.NewReader(c.conn)
 	c.writer = bufio.NewWriter(c.conn)
 
-	return *c, err
+	return c, nil
 }
 
 func (c *wireChannel) setCryptKey(plugin string, sessionKey []byte, nonce []byte) (err error) {
@@ -113,6 +114,22 @@ func (c *wireChannel) Write(buf []byte) (n int, err error) {
 
 func (c *wireChannel) Flush() error {
 	return c.writer.Flush()
+}
+
+func (c *wireChannel) writePacket(buf []byte) (written int, err error) {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+
+	for written < len(buf) {
+		var n int
+		n, err = c.Write(buf[written:])
+		if err != nil {
+			return written, err
+		}
+		written += n
+	}
+
+	return written, c.Flush()
 }
 
 func (c *wireChannel) Close() error {
