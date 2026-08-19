@@ -94,6 +94,8 @@ func (rows *firebirdsqlRows) Next(dest []driver.Value) (err error) {
 		if err != nil {
 			return err
 		}
+		stopCancel := rows.stmt.watchCancel(rows.ctx)
+		defer stopCancel()
 		chunk, rows.moreData, err = rows.stmt.fc.wp.opFetchResponse(rows.stmt.stmtHandle, rows.stmt.fc.tx.transHandle, rows.stmt.xsqlda)
 
 		if err == nil {
